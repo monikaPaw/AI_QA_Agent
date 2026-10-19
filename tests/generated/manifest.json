@@ -1,0 +1,16 @@
+{
+  "scenarios/checkout_problem_user.md": {
+    "generated_at": "2026-10-18T19:10:50",
+    "model": "gemini-3.5-flash-lite",
+    "provider": "gemini",
+    "sha256": "ec81c38e4f516588e12ae3edf870ed9049b053981e7a223d0dab2b0985697962",
+    "test_file": "tests/generated/test_checkout_problem_user.py"
+  },
+  "scenarios/checkout_standard_user.md": {
+    "generated_at": "2026-10-18T18:55:16",
+    "model": "gemini-3.5-flash-lite",
+    "provider": "gemini",
+    "sha256": "2d7435d89407f273c5ee5733872f5ea2926770cfab560788eacce60d7012b6d3",
+    "test_file": "tests/generated/test_checkout_standard_user.py"
+  }
+}

@@ -1,0 +1,20 @@
+# --- Secrets: never commit -------------------------------------------------
+.env
+.env.*
+!.env.example
+*.local.md
+
+# --- Python ----------------------------------------------------------------
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# --- Test / tool caches ----------------------------------------------------
+.pytest_cache/
+test-results/
+playwright-report/
+
+# --- Generated run artifacts ----------------------------------------------
+reports/
+*.log

@@ -1,0 +1,5 @@
+# AI-first path (agent/) - needs a model/API key configured in MODEL_ACCESS.md.
+-r requirements.txt
+browser-use>=0.13.0
+rich>=13.9.4
+python-dotenv>=1.0.1
