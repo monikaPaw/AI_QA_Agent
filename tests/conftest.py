@@ -32,7 +32,6 @@ sys.path.insert(0, str(TESTS_DIR))
 
 from reporting import (  # noqa: E402
     FAILED,
-    MIXED,
     NOT_RUN,
     PASSED,
     RunReport,
@@ -225,14 +224,6 @@ def _build_report() -> RunReport:
                 "description": r.assertion,
                 "evidence": (r.traceback or r.note or ""),
                 "impact": "Blocks completing the scenario as expected.",
-            })
-        elif r.outcome == MIXED:
-            anomalies.append({
-                "title": "Mixed result",
-                "severity": "medium",
-                "description": r.assertion or r.note or "Mixed outcome",
-                "evidence": "See step timeline.",
-                "impact": "Needs review.",
             })
 
     # simple dedupe

@@ -11,7 +11,6 @@ from pathlib import Path
 
 from .model import (
     FAILED,
-    MIXED,
     NOT_RUN,
     PASSED,
     RECOVERY,
@@ -27,7 +26,6 @@ def _outcome_label(outcome: str) -> str:
         PASSED: "PASSED",
         FAILED: "FAILED",
         SKIPPED: "SKIPPED",
-        MIXED: "MIXED",
         RECOVERY: "RECOVERY",
         NOT_RUN: "NOT RUN",
     }.get(outcome, outcome.upper())
@@ -53,8 +51,6 @@ def render_markdown(report: RunReport) -> str:
         md.append(f"- **Provider:** {report.provider}")
     md.append(f"- **Tests Passed:** {report.passed}")
     md.append(f"- **Tests Failed:** {report.failed}")
-    if report.issues > report.failed:
-        md.append(f"- **Tests with Issues (mixed):** {report.issues - report.failed}")
     if report.skipped:
         md.append(f"- **Tests Skipped:** {report.skipped}")
     md.append(f"- **Completed Successfully:** {report.verdict == 'PASS'}")
@@ -68,7 +64,7 @@ def render_markdown(report: RunReport) -> str:
     md.append("TESTS EXECUTED:")
     for test in report.tests:
         line = f"- {_outcome_label(test.outcome)}: `{test.name}` ({test.duration:.2f}s)"
-        if test.outcome in (FAILED, MIXED):
+        if test.outcome == FAILED:
             step = test.failed_step
             if step:
                 line += f" at step {step.index} ({step.name})"
@@ -81,8 +77,6 @@ def render_markdown(report: RunReport) -> str:
             f"VERDICT: {report.verdict} - one or more checks did not succeed; "
             "see Failures Found below."
         )
-    elif any(t.outcome == MIXED for t in report.tests):
-        md.append(f"VERDICT: {report.verdict} - the scenario ran but flagged issues worth reviewing.")
     else:
         md.append(f"VERDICT: {report.verdict} - the scenario completed with no detected failures.")
     md.append("")
@@ -130,7 +124,7 @@ def render_markdown(report: RunReport) -> str:
             md.append("")
 
     # ----------------------------------------------------------- failures
-    failures = [t for t in report.tests if t.outcome in (FAILED, MIXED)]
+    failures = [t for t in report.tests if t.outcome == FAILED]
     md.append("## Failures Found")
     if not failures:
         md.append("None detected.")
@@ -151,7 +145,10 @@ def render_markdown(report: RunReport) -> str:
             if test.failure_screenshot:
                 md.append(f"- **Screenshot at the moment of failure:** {test.failure_screenshot}")
             md.append(f"- **Duration:** {test.duration:.2f}s")
-            md.append("- **Impact:** the scenario could not be completed as expected for this user account.")
+            md.append(
+                "- **Impact:** the scenario could not be completed as expected for "
+                "this user account."
+            )
             md.append("")
             if step and step.screenshot:
                 md.append(f"**Screenshot of the failed step (step {step.index} - {step.name}):**")

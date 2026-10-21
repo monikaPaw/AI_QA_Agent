@@ -69,21 +69,33 @@ silent, use normal e-commerce behaviour and mark the anomaly **low**.
 - Keep going after an anomaly if you safely can. Stop and report if you are blocked.
 - Do not work around a defect to make the test pass. A workaround is a finding,
   not a success.
+- **Never mark a step PASS unless you actually saw its result.** A click that was
+  submitted is not proof: verify the next page (e.g. the order confirmation page
+  for "complete the order"). If you did not reach that page, the step is
+  **NOT RUN**, not PASS.
+- If any scenario step is FAIL, the summary must say the scenario did **not**
+  complete successfully. Never write "the order completed successfully" while a
+  step is FAIL or NOT RUN.
 - If you were blocked by your own tooling (stale element, timeout, navigation
   glitch) rather than by the app, do NOT report it as an app anomaly. Use verdict
-  **MIXED** and say so in the summary.
+  **FAIL**, explain the tooling problem in the summary, and say what was not verified.
 - Finish by calling done() with the structured verdict. Set `success=true` ONLY if
   you found no anomalies and every scenario step passed.
 
 ## Reporting
 
-The final `done()` must fill the structured verdict:
+The final `done()` must fill the structured verdict. The verdict is strictly binary -
+there is no MIXED result:
 
-- **verdict**: PASS (no anomalies, all steps passed) | MIXED (completed but issues
-  found, or blocked by tooling) | FAIL (the scenario could not be completed).
-- **summary**: 2-4 sentences on what worked and what did not.
+- **verdict**: PASS (every scenario step passed and no anomaly was found) | FAIL
+  (anything else: a step failed or was not run, an anomaly was observed, or tooling
+  blocked the run).
+- **summary**: 2-4 sentences on what worked and what did not. It must agree with
+  `scenario_steps`: if any step is FAIL or NOT RUN, do not claim the scenario or
+  the order completed.
 - **scenario_steps**: exactly one entry per scenario step, in order, prefixed with
   the step number, using PASS / FAIL / NOT RUN, e.g.
-  `"5. Enter info: FAIL - first name changed to 'r'"`.
+  `"5. Enter info: FAIL - first name changed to 'r'"`. PASS requires that you saw
+  the page/state the step produces.
 - **anomalies**: one entry per distinct defect, in your own words, with severity,
   scenario step, expected, observed, evidence and impact.

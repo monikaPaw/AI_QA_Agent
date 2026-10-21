@@ -43,13 +43,14 @@ from agent.qa_verdict import (  # noqa: E402
     QAVerdict,
     anomalies_for_report,
     failed_step_for_verdict,
+    first_failed_scenario_line,
+    first_not_passed_scenario_line,
     parse_verdict,
     unparsed_card,
 )
 from config.load_model_access import ModelAccessConfig  # noqa: E402
 from reporting import (  # noqa: E402
     FAILED,
-    MIXED,
     PASSED,
     RunReport,
     StepResult,
@@ -223,6 +224,64 @@ def detect_implausible_success(steps: list[StepResult], successful) -> Optional[
     return None
 
 
+# SauceDemo's order confirmation page. A verdict may only claim the order was
+# placed if the browser actually ended up here.
+_ORDER_COMPLETE_PATH = "/checkout-complete.html"
+
+# Scenario-step wording that claims the order was placed (as opposed to merely
+# continuing through checkout).
+_COMPLETION_CLAIM = re.compile(
+    r"complete\s+the\s+order|order\s+(?:was\s+)?(?:completed|placed)|finish(?:ed)?\s+the\s+order",
+    re.IGNORECASE,
+)
+
+
+def detect_false_completion(verdict, steps: list[StepResult]) -> Optional[str]:
+    """Catch a verdict that claims the order completed when it never did.
+
+    Observed in a real run: the agent marked "6. Continue through checkout: PASS"
+    and "7. Complete the order successfully: PASS" while the last recorded URL was
+    still ``/checkout-step-one.html`` - the overview and finish pages were never
+    reached, yet the summary said "the order ultimately completed successfully".
+    A completion claim is only credible when the final page is the confirmation
+    page. Returns a reason string, or None.
+    """
+    if verdict is None or not steps:
+        return None
+    claimed = [
+        line
+        for line in verdict.scenario_steps
+        if _COMPLETION_CLAIM.search(line) and re.search(r"\bPASS(?:ED)?\b", line, re.IGNORECASE)
+    ]
+    if not claimed:
+        return None
+    final_url = steps[-1].url or ""
+    if _ORDER_COMPLETE_PATH in final_url:
+        return None
+    try:
+        path = urlparse(final_url).path or "/"
+    except Exception:  # noqa: BLE001
+        path = final_url or "(no page recorded)"
+    return (
+        f"the agent marked '{claimed[0].strip()}' as PASS, but the browser ended on "
+        f"{path} and never reached the order confirmation page"
+    )
+
+
+def detect_contradictory_pass(verdict) -> Optional[str]:
+    """Catch a PASS verdict whose own scenario steps are not all PASS.
+
+    PASS means every scenario step passed. A step the agent marked FAIL or
+    NOT RUN contradicts the verdict, so the run cannot be a pass.
+    """
+    if verdict is None or verdict.verdict != "PASS":
+        return None
+    line = first_not_passed_scenario_line(verdict)
+    if not line:
+        return None
+    return f"the verdict was PASS, but the agent marked '{line}' as not passed"
+
+
 def copy_screenshots(history, run_dir: Path, steps: list[StepResult]) -> None:
     """Copy browser-use screenshots into the run directory, one per step.
 
@@ -342,7 +401,8 @@ def run_one(scenario_path: Path, cfg: dict, embed: bool, budget: int) -> int:
         else bool(_safe(lambda: history.is_successful(), False))
     )
 
-    # A model that declares victory on the login page must not be able to PASS the run.
+    # A verdict may claim things the browser never did. Code checks those claims
+    # against the run's own trace; the model's prose is never taken on trust.
     false_success = detect_implausible_success(steps, successful)
     if false_success:
         integrity.append({
@@ -354,6 +414,34 @@ def run_one(scenario_path: Path, cfg: dict, embed: bool, budget: int) -> int:
             ),
             "evidence": f"Final browser URL: {steps[-1].url or '(none recorded)'}",
             "impact": "The result is inconclusive; the run only proves the agent started the page.",
+            "source": "harness",
+        })
+
+    false_completion = detect_false_completion(verdict, steps)
+    if false_completion:
+        integrity.append({
+            "title": "Agent claimed steps that never ran",
+            "severity": "high",
+            "description": (
+                f"The model's verdict claims the scenario finished, but {false_completion}. "
+                "The later scenario steps are therefore unverified - treat them as NOT RUN."
+            ),
+            "evidence": f"Final browser URL: {steps[-1].url or '(none recorded)'}",
+            "impact": "The run cannot be reported as complete; only the steps up to the last real page are evidence.",
+            "source": "harness",
+        })
+
+    contradictory_pass = detect_contradictory_pass(verdict)
+    if contradictory_pass:
+        integrity.append({
+            "title": "Verdict contradicts its own scenario steps",
+            "severity": "high",
+            "description": (
+                f"The model returned PASS, but {contradictory_pass}. "
+                "A verdict that disagrees with its own per-step assessment is not a pass."
+            ),
+            "evidence": "See the scenario steps listed for this test.",
+            "impact": "The result is not trustworthy as a pass; review the timeline.",
             "source": "harness",
         })
 
@@ -388,18 +476,18 @@ def run_one(scenario_path: Path, cfg: dict, embed: bool, budget: int) -> int:
         note = f"step time: {timing['seconds']}s"
         step.detail = f"{step.detail}  _({note})_" if step.detail else f"_({note})_"
 
-    # ---- outcome: the model decides, code only downgrades --------------------
-    if false_success:
+    # ---- outcome: binary on purpose -----------------------------------------
+    # PASS only when the agent says PASS and every check below agrees. Anything
+    # else - an unfinished run, an unparsed verdict, a contradiction, an anomaly
+    # - is a FAIL. There is no third "mixed" state.
+    if false_success or false_completion or contradictory_pass:
         outcome = FAILED
-    elif not done:
-        outcome = MIXED if steps else FAILED
-    elif verdict is None:
-        # No usable verdict: never a pass. The raw narrative stays in the timeline.
-        outcome = MIXED
+    elif not done or verdict is None:
+        outcome = FAILED
     else:
-        outcome = {"PASS": PASSED, "MIXED": MIXED, "FAIL": FAILED}[verdict.verdict]
+        outcome = PASSED if verdict.verdict == "PASS" else FAILED
         if outcome == PASSED and anomalies:
-            outcome = MIXED          # the model contradicted itself
+            outcome = FAILED          # a PASS with findings is a contradiction
 
     if verdict is not None:
         assertion = verdict.summary
@@ -409,6 +497,10 @@ def run_one(scenario_path: Path, cfg: dict, embed: bool, budget: int) -> int:
         assertion = "the agent did not reach a final verdict (run stopped early)"
     if false_success:
         assertion = f"Agent reported success, but {false_success}."
+    elif false_completion:
+        assertion = f"Agent claimed steps that never ran: {false_completion}."
+    elif contradictory_pass:
+        assertion = f"The agent's PASS verdict contradicts its own scenario steps: {contradictory_pass}."
 
     run_id = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     run_dir = PROJECT_ROOT / "reports" / "agent" / run_id
@@ -426,11 +518,21 @@ def run_one(scenario_path: Path, cfg: dict, embed: bool, budget: int) -> int:
     if outcome == FAILED and steps and failed_step_index is None:
         failed_step_index = steps[-1].index
     if failed_step_index is not None:
+        # The row is badged FAILED, so its text must describe the failure - never
+        # the model's overall summary (which can say "the order completed").
+        failed_scenario_line = (
+            first_failed_scenario_line(verdict) if verdict is not None else None
+        )
+        step_assertion = (
+            f"Scenario step did not pass: {failed_scenario_line}"
+            if failed_scenario_line
+            else assertion
+        )
         for step in steps:
             if step.index == failed_step_index:
                 step.status = FAILED
                 if not step.error:
-                    step.error = assertion
+                    step.error = step_assertion
                 break
 
     test = TestResult(
@@ -466,6 +568,12 @@ def run_one(scenario_path: Path, cfg: dict, embed: bool, budget: int) -> int:
         summary = "The agent stopped before reaching a final verdict."
         if last_observation:
             summary += f" Last observation: {last_observation[:400]}"
+    if false_completion or contradictory_pass:
+        # Never present a claim the trace already disproved as if it were fact.
+        summary = (
+            "The agent's account below is contradicted by the browser trace "
+            f"({false_completion or contradictory_pass}). See Run Integrity.\n\n{summary}"
+        )
     report.summary = (
         f"{summary}\n\nTotal wall-clock time: {elapsed_total:.0f}s across {len(steps)} agent steps. "
         f"Verdict: {report.verdict}."

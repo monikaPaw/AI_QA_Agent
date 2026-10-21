@@ -19,7 +19,6 @@ from jinja2 import Environment
 
 from .model import (
     FAILED,
-    MIXED,
     NOT_RUN,
     PASSED,
     RECOVERY,
@@ -38,7 +37,7 @@ _SOURCE = r"""<!DOCTYPE html>
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
 <title>{{ title }}</title>
 <style>
-  :root { --pass:#2e7d32; --fail:#c62828; --skip:#f9a825; --mixed:#ef6c00; --ink:#202124; --muted:#5f6368; --line:#e0e0e0; --bg:#f5f6f8; }
+  :root { --pass:#2e7d32; --fail:#c62828; --skip:#f9a825; --warn:#ef6c00; --ink:#202124; --muted:#5f6368; --line:#e0e0e0; --bg:#f5f6f8; }
   * { box-sizing: border-box; }
   body { font-family:"Segoe UI",Roboto,Helvetica,Arial,sans-serif; margin:0; background:var(--bg); color:var(--ink); }
   .banner { padding:18px 28px; color:#fff; font-size:20px; font-weight:600; display:flex; justify-content:space-between; align-items:center; gap:16px; flex-wrap:wrap; }
@@ -55,7 +54,7 @@ _SOURCE = r"""<!DOCTYPE html>
   .kpi strong { font-size:15px; }
   .pill { display:inline-block; padding:2px 10px; border-radius:999px; font-size:12px; font-weight:700; color:#fff; white-space:nowrap; }
   .pill.passed { background:var(--pass); } .pill.failed { background:var(--fail); }
-  .pill.skipped { background:var(--skip); } .pill.mixed { background:var(--mixed); }
+  .pill.skipped { background:var(--skip); }
   .pill.not-run { background:#9aa0a6; }
   .pill.recovery { background:#8d6e63; }
   .test { border:1px solid var(--line); border-radius:8px; margin-bottom:18px; overflow:hidden; }
@@ -84,15 +83,15 @@ _SOURCE = r"""<!DOCTYPE html>
   pre { background:#1e1e1e; color:#d4d4d4; padding:14px; border-radius:6px; overflow-x:auto; font-size:12.5px; line-height:1.5; }
   code { background:#f1f3f4; padding:1px 5px; border-radius:4px; font-size:13px; }
   ul { padding-left:22px; color:#3c4043; } li { margin-bottom:6px; }
-  .anomaly { border:1px solid var(--line); border-left:4px solid var(--mixed); border-radius:6px; padding:12px 16px; margin-bottom:10px; }
+  .anomaly { border:1px solid var(--line); border-left:4px solid var(--warn); border-radius:6px; padding:12px 16px; margin-bottom:10px; }
   footer { text-align:center; color:#9aa0a6; font-size:12px; padding:14px 0 0; }
   #lightbox { display:none; position:fixed; inset:0; background:rgba(0,0,0,.9); z-index:1000; cursor:zoom-out; }
   #lightbox img { max-width:94%; max-height:94%; margin:3% auto; display:block; border-radius:6px; }
 </style>
 </head>
 <body>
-<div class="banner {{ 'pass' if report.ok else 'fail' }}">
-  <span>{{ "All tests passed" if report.ok else "Test run failed" }} &mdash; {{ title }}</span>
+<div class="banner {{ report.banner_kind }}">
+  <span>{{ report.banner_text }} &mdash; {{ title }}</span>
   <span class="meta">{{ counts }} &#183; {{ report.generated_at }}</span>
 </div>
 
@@ -235,7 +234,6 @@ _LABELS = {
     PASSED: "PASSED",
     FAILED: "FAILED",
     SKIPPED: "SKIPPED",
-    MIXED: "MIXED",
     RECOVERY: "RECOVERY",
     NOT_RUN: "NOT RUN",
 }
@@ -273,7 +271,7 @@ def _step_ctx(step, out_dir: Path, embed: bool) -> Dict[str, Any]:
 
 def render_html(report: RunReport, out_dir: Path, embed: bool = True, title: str = "SauceDemo QA Test Report") -> str:
     out_dir = Path(out_dir)
-    counts = " &#183; ".join(
+    counts = " · ".join(
         part
         for part in (
             f"{report.passed} passed" if report.passed else "",
@@ -298,7 +296,7 @@ def render_html(report: RunReport, out_dir: Path, embed: bool = True, title: str
             }
         )
 
-    failures = [t for t in report.tests if t.outcome in (FAILED, MIXED)]
+    failures = [t for t in report.tests if t.outcome == FAILED]
     failures_ctx = [
         {
             "name": test.name,

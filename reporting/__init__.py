@@ -6,7 +6,6 @@
 """
 from .model import (  # noqa: F401
     FAILED,
-    MIXED,
     NOT_RUN,
     PASSED,
     RECOVERY,
@@ -26,7 +25,6 @@ __all__ = [
     "PASSED",
     "FAILED",
     "SKIPPED",
-    "MIXED",
     "NOT_RUN",
     "RECOVERY",
     "apply_recovery_status",

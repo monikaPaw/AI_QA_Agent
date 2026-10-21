@@ -11,10 +11,10 @@ import json
 import re
 from typing import List, Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 # Bump when the fields change, so an old report can be told apart from a new one.
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 class Anomaly(BaseModel):
@@ -44,7 +44,13 @@ class Anomaly(BaseModel):
 class QAVerdict(BaseModel):
     """The structured verdict the agent must produce when it calls done()."""
 
-    verdict: Literal["PASS", "FAIL", "MIXED"]
+    verdict: Literal["PASS", "FAIL"] = Field(
+        description=(
+            "PASS only if every scenario step passed and no anomaly was found. "
+            "FAIL for anything else: a step failed, a step was not run, an anomaly "
+            "was observed, or tooling blocked the run. There is no MIXED verdict."
+        )
+    )
     summary: str = Field(description="2-4 sentences: what worked, what did not")
     scenario_steps: List[str] = Field(
         default_factory=list,
@@ -54,6 +60,14 @@ class QAVerdict(BaseModel):
         ),
     )
     anomalies: List[Anomaly] = Field(default_factory=list)
+
+    @field_validator("verdict", mode="before")
+    @classmethod
+    def _no_mixed(cls, value):
+        """A legacy/rogue 'MIXED' answer is a FAIL, never a third state."""
+        if isinstance(value, str) and value.strip().upper() == "MIXED":
+            return "FAIL"
+        return value
 
 
 # --------------------------------------------------------------------- parsing
@@ -126,6 +140,7 @@ def first_valid_agent_step(verdict: QAVerdict, n_steps: int) -> Optional[int]:
 
 _STEP_NUMBER = re.compile(r"^\s*(\d+)\s*[.)]")
 _FAILED = re.compile(r"\bFAIL(?:ED)?\b", re.IGNORECASE)
+_PASSED = re.compile(r"\bPASS(?:ED)?\b", re.IGNORECASE)
 
 
 def first_failed_scenario_step(verdict: QAVerdict) -> Optional[int]:
@@ -134,6 +149,31 @@ def first_failed_scenario_step(verdict: QAVerdict) -> Optional[int]:
         match = _STEP_NUMBER.match(line)
         if match and _FAILED.search(line):
             return int(match.group(1))
+    return None
+
+
+def first_failed_scenario_line(verdict: QAVerdict) -> Optional[str]:
+    """The first scenario step line the agent marked FAIL, as the agent wrote it.
+
+    Used as the failed row's assertion text, so a row badged FAILED never carries
+    the model's (possibly contradictory) overall summary.
+    """
+    for line in verdict.scenario_steps:
+        match = _STEP_NUMBER.match(line)
+        if match and _FAILED.search(line):
+            return line.strip()
+    return None
+
+
+def first_not_passed_scenario_line(verdict: QAVerdict) -> Optional[str]:
+    """The first scenario step line that is not marked PASS, or None.
+
+    A PASS verdict is only valid when every scenario step is PASS; anything else
+    (FAIL, NOT RUN, or a missing marker) contradicts it.
+    """
+    for line in verdict.scenario_steps:
+        if _STEP_NUMBER.match(line) and not _PASSED.search(line):
+            return line.strip()
     return None
 
 

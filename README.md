@@ -118,8 +118,15 @@ Those anomaly cards are the agent's own words; code only validates the structure
 and links the evidence.
 
 Code-authored facts about the run itself — budget stop, claimed success without
-leaving the login page, unparsed verdict — are reported separately under
-**Run Integrity**, never mixed into the AI findings.
+leaving the login page, **steps the agent claimed but never reached** (e.g. "order
+completed" while the browser is still on the checkout form), a PASS verdict that
+contradicts its own scenario steps, and unparsed verdicts — are reported separately
+under **Run Integrity**, never mixed into the AI findings.
+
+The verdict is **binary**: `PASS` only when every scenario step passed and no
+anomaly was found; everything else (a failed step, a step that never ran, a
+finding, a tooling block, an unfinished run) is `FAIL`. There is no "mixed" state,
+and the report banner is only green on a real `PASS`.
 
 The deterministic pytest suite does not use this contract; it stays model-free.
 

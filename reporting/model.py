@@ -14,7 +14,6 @@ from typing import List, Optional
 PASSED = "passed"
 FAILED = "failed"
 SKIPPED = "skipped"
-MIXED = "mixed"
 NOT_RUN = "not-run"
 # Steps executed AFTER the first failure. They are not clean passes: the run was
 # already failing, so these rows are the agent trying to recover. Rendered
@@ -165,24 +164,29 @@ class RunReport:
         return sum(1 for t in self.tests if t.outcome == SKIPPED)
 
     @property
-    def issues(self) -> int:
-        """Tests that need attention: outright failures plus 'mixed' runs."""
-        return sum(1 for t in self.tests if t.outcome in (FAILED, MIXED))
-
-    @property
     def duration(self) -> float:
         return sum(t.duration for t in self.tests)
 
     @property
     def verdict(self) -> str:
-        if self.failed:
-            return "FAIL"
-        if any(t.outcome == MIXED for t in self.tests):
-            return "MIXED"
-        if self.tests and not self.passed:
-            return "INCOMPLETE"
-        return "PASS"
+        """Binary on purpose: PASS only when every test passed.
+
+        There is no third state. A skipped test, a test that never ran, or a test
+        that finished with findings is a FAIL - "mixed" hid real failures.
+        """
+        if self.tests and all(t.outcome == PASSED for t in self.tests):
+            return "PASS"
+        return "FAIL"
 
     @property
     def ok(self) -> bool:
-        return self.failed == 0
+        return self.verdict == "PASS"
+
+    @property
+    def banner_kind(self) -> str:
+        """CSS class for the report banner: only PASS is green."""
+        return "pass" if self.ok else "fail"
+
+    @property
+    def banner_text(self) -> str:
+        return "All tests passed" if self.ok else "Test run failed"
