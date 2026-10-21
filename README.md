@@ -7,7 +7,7 @@ One agent, two jobs:
 
 | Piece | What it does | Needs a model? |
 |---|---|---|
-| **AI agent** (`agent/`) | Runs the scenario end-to-end, observes the live UI, flags anomalies | yes (`MODEL_ACCESS.md`) |
+| **AI agent** (`agent/`) | Runs the scenario end-to-end, observes the live UI, authors the findings | yes (`MODEL_ACCESS.md`) |
 | **Test generator** (`tools/generate_tests.py`) | Turns a `scenarios/*.md` into a pytest file (hash-gated: only when the scenario changes) | yes (one call) |
 | **Deterministic gate** (`tests/generated/`) | The generated pytest files — the gate of record | **no** |
 
@@ -109,11 +109,28 @@ The generated file only imports the shared `tests\steps\step_helpers.py`, so the
 
 ## The reports
 
+### Who writes the findings
+
+The agent returns a structured verdict (`agent/qa_verdict.py`) when it calls
+`done()`: the verdict, a summary, one entry per scenario step, and a list of
+anomalies with severity, scenario step, expected vs observed, evidence and impact.
+Those anomaly cards are the agent's own words; code only validates the structure
+and links the evidence.
+
+Code-authored facts about the run itself — budget stop, claimed success without
+leaving the login page, unparsed verdict — are reported separately under
+**Run Integrity**, never mixed into the AI findings.
+
+The deterministic pytest suite does not use this contract; it stays model-free.
+
 Markdown (`report.md`) follows this format:
 
-`Executive Summary` → `Failures Found` → `Step-by-Step Timeline` → `Evidence` → `Suggested Improvements` → `Evolution Ideas`.
+`Executive Summary` → `Anomalies Found` (if any) → `Run Integrity` (if any) → `Failures Found` → `Step-by-Step Timeline` → `Evidence`.
 
-`Suggested Improvements` and `Evolution Ideas` are **derived from the run** (anomalies, failed steps, verdict, stop reason) — not hard-coded.
+`Anomalies Found` holds the findings (authored by the agent in the AI path, derived
+from the failing test in the pytest path); `Run Integrity` holds code-authored facts
+about the run (budget stop, false success, unparsed verdict). `Failures Found` always
+follows, so a failing run stays visible even when no anomaly was authored.
 
 `index.html` shows **one row per scenario step** with, in the same place:
 
@@ -141,6 +158,7 @@ saucedemo-ai-qa-agent/
 │   └─ load_model_access.py     # parses MODEL_ACCESS.md -> config/env
 ├─ agent/                       # AI path (analyze + execute)
 │   ├─ run_scenario.py          # CLI: run a scenario with the agent
+│   ├─ qa_verdict.py            # the AI output contract (schema + parser + mapper)
 │   └─ agent_setup.py           # builds the Browser Use agent
 ├─ tools/
 │   └─ generate_tests.py        # scenario .md -> deterministic pytest file (hash-gated)
@@ -152,7 +170,6 @@ saucedemo-ai-qa-agent/
 │   ├─ model.py                 # run/step/test result objects
 │   ├─ markdown.py              # report.md
 │   └─ html.py                  # index.html (per-step result + embedded screenshot)
-├─ docs/                        # architecture docs (solution md + excalidraw)
 └─ reports/
     ├─ agent/<timestamp>/       # AI-path output
     └─ pytest/<timestamp>/      # deterministic output
@@ -172,6 +189,6 @@ The active config is **Google Gemini's free tier** (`Provider: gemini` → `Chat
 
 ## Notes
 
-- The AI agent explores and explains; the generated pytest suite is the **gate of record**. When they disagree, the agent's trace is the evidence attached to the failing test.
+- The AI agent explores, explains and **authors the anomaly list**; code only validates it and enforces run integrity. The generated pytest suite is still the **gate of record**. When they disagree, the agent's trace is the evidence attached to the failing test.
 - **Review the first generation** of any test file — the LLM can add redundant or slightly-off assertions.
 - `problem_user` deliberately breaks checkout (typing Last Name corrupts First Name), which is why its test fails — that failure is the point of the scenario.

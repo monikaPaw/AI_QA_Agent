@@ -239,6 +239,7 @@ class AgentBuilder:
         initial_actions: Optional[list] = None,
         step_callback=None,
         should_stop=None,
+        output_model=None,
     ) -> Tuple[Any, Dict[str, Any]]:
         mods = self._imports()
         Agent = mods["Agent"]
@@ -256,6 +257,11 @@ class AgentBuilder:
 
         agent_kwargs: Dict[str, Any] = {"task": task, "llm": llm}
         params = self._params(Agent)
+
+        # Structured final answer: the caller owns the contract (agent/qa_verdict.py),
+        # this module only wires it into the Agent when the installed version supports it.
+        if output_model is not None and "output_model_schema" in params:
+            agent_kwargs["output_model_schema"] = output_model
 
         if browser_session is not None:
             if "browser_session" in params:

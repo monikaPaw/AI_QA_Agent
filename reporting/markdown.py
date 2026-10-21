@@ -91,8 +91,36 @@ def render_markdown(report: RunReport) -> str:
 
     if report.anomalies:
         md.append("## Anomalies Found")
+        md.append(
+            "*Reported by the AI agent in its own words; code only validates the "
+            "structure and links the evidence.*"
+        )
+        md.append("")
         for i, a in enumerate(report.anomalies, 1):
             md.append(f"### {i}. {a.get('title', 'Anomaly')}")
+            md.append(f"- **Severity:** {a.get('severity', 'medium')}")
+            if a.get("scenario_step"):
+                md.append(f"- **Scenario step:** {a['scenario_step']}")
+            if a.get("step"):
+                md.append(f"- **Agent step:** {a['step']}")
+            if a.get("expected"):
+                md.append(f"- **Expected:** {a['expected']}")
+            if a.get("observed"):
+                md.append(f"- **Observed:** {a['observed']}")
+            if not a.get("expected") and not a.get("observed"):
+                md.append(f"- **Description:** {a.get('description', '')}")
+            if a.get("evidence"):
+                md.append(f"- **Evidence:** {a['evidence']}")
+            if a.get("impact"):
+                md.append(f"- **Impact:** {a['impact']}")
+            md.append("")
+
+    if report.integrity:
+        md.append("## Run Integrity")
+        md.append("*Objective checks on the run itself, not product findings.*")
+        md.append("")
+        for i, a in enumerate(report.integrity, 1):
+            md.append(f"### {i}. {a.get('title', 'Run check')}")
             md.append(f"- **Severity:** {a.get('severity', 'medium')}")
             md.append(f"- **Description:** {a.get('description', '')}")
             if a.get("evidence"):
@@ -137,6 +165,11 @@ def render_markdown(report: RunReport) -> str:
         md.append(
             f"### Test {i}: {test.name} - {_outcome_label(test.outcome)} ({test.duration:.2f}s)"
         )
+        if test.scenario_steps:
+            md.append("#### Scenario steps (agent's own assessment)")
+            for line in test.scenario_steps:
+                md.append(f"- {line}")
+            md.append("")
         if not test.steps:
             md.append("*No scenario steps were executed (test failed during setup).*")
             md.append("")

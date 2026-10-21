@@ -51,6 +51,8 @@ class TestResult:
     failure_screenshot: Optional[str] = None
     note: str = ""
     failed_step_index: Optional[int] = None
+    # The agent's own per-scenario-step assessment (e.g. "5. Enter info: FAIL").
+    scenario_steps: List[str] = field(default_factory=list)
 
     @property
     def failed_step(self) -> Optional[StepResult]:
@@ -94,11 +96,18 @@ def apply_recovery_status(test: "TestResult") -> list:
     - every step AFTER that anchor becomes `RECOVERY`,
     - a JS `evaluate` at or after the anchor is additionally flagged `workaround`.
 
+    The anchor is ``failed_step_index`` when the caller knows it (the AI path sets
+    it from the model's verdict). Falling back to the first `FAILED` row would let
+    a transient model/API error in the middle of a run re-label every later real
+    step as RECOVERY.
+
     Returns lightweight copies so the original report data is untouched. The
     deterministic pytest path never hits this: its post-failure steps are already
     `NOT_RUN`, not `PASSED`.
     """
-    anchor = next((s.index for s in test.steps if s.status == FAILED), None)
+    anchor = test.failed_step_index
+    if anchor is None:
+        anchor = next((s.index for s in test.steps if s.status == FAILED), None)
     out = []
     for step in test.steps:
         status = step.status
@@ -138,6 +147,9 @@ class RunReport:
     what_it_did: str = ""
     automated_vs_human: str = ""
     anomalies: List[dict] = field(default_factory=list)
+    # Code-authored facts about the run itself (budget stop, false success,
+    # unparsed verdict). Kept apart from `anomalies`, which the AI authors.
+    integrity: List[dict] = field(default_factory=list)
 
     # -------------------------------------------------------------- derived
     @property

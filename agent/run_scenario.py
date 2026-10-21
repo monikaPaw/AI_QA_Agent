@@ -20,9 +20,10 @@ The agent performs the login itself (scenario step 1), like a real user.
 This path needs a model/API key (see MODEL_ACCESS.md) and `requirements-agent.txt`.
 It writes its report to reports/agent/<timestamp>/ (report.md + index.html).
 
-The model does not decide pass/fail here by itself: the agent's own verdict and
-observations are recorded, and the deterministic pytest suite remains the gate of
-record for a known scenario.
+The agent decides the verdict and authors the findings (see agent/qa_verdict.py).
+This script only validates them, links the evidence and renders the report;
+code-authored run facts are reported separately under "Run Integrity". The
+deterministic pytest suite remains the gate of record for a known scenario.
 """
 import argparse
 import json
@@ -38,6 +39,13 @@ from urllib.parse import urlparse
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
+from agent.qa_verdict import (  # noqa: E402
+    QAVerdict,
+    anomalies_for_report,
+    failed_step_for_verdict,
+    parse_verdict,
+    unparsed_card,
+)
 from config.load_model_access import ModelAccessConfig  # noqa: E402
 from reporting import (  # noqa: E402
     FAILED,
@@ -98,7 +106,6 @@ def build_task(title: str, text: str) -> str:
         "Behaviour rules:\n"
         "- On the login page, identify the username field, password field and login button from "
         "the page state, then use them.\n"
-        "- Do as much as possible in each step (you may batch several actions per step).\n"
         "- After typing into a field, read the field's actual value back and verify it matches "
         "what you intended before moving on.\n"
         "- After adding items, verify the cart badge count.\n"
@@ -109,8 +116,8 @@ def build_task(title: str, text: str) -> str:
         "- If the same obstacle blocks you after two attempts, stop trying workarounds: record the "
         "evidence, finish the run with done(success=false, ...), and describe exactly what you "
         "observed. Do not burn steps on repeated retries.\n"
-        "- Flag anything unexpected or suspicious with evidence.\n"
-        "- Finish with a clear verdict: PASS, FAIL or MIXED, plus what worked and what did not."
+        "- Record every anomaly in the structured verdict: scenario step, expected, observed, evidence.\n"
+        "- Set success=true ONLY if you found no anomalies and every scenario step passed."
     )
 
 
@@ -188,26 +195,6 @@ def extract_steps(history) -> list[StepResult]:
     return steps
 
 
-def pick_failed_step_index(steps: list[StepResult]) -> Optional[int]:
-    """The step where the defect became visible, if we can spot it.
-
-    Action-level JavaScript errors are not the story: the agent recovers from
-    those. The interesting failure is where a form field would not keep the value
-    the agent typed, so prefer the first step whose observation says that.
-    """
-    for step in steps:
-        text = (step.detail or "").lower().replace("-", " ")
-        mentions_field = "first name" in text or "last name" in text
-        looks_wrong = any(
-            term in text
-            for term in ("instead of", "empty", "not accept", "does not accept",
-                         "remains empty", "is required", "wrong value", "incorrect")
-        )
-        if mentions_field and looks_wrong:
-            return step.index
-    return None
-
-
 def _is_login_page(url: str) -> bool:
     """SauceDemo serves the login form at the site root; any other path means we moved on."""
     if "saucedemo.com" not in (url or ""):
@@ -234,69 +221,6 @@ def detect_implausible_success(steps: list[StepResult], successful) -> Optional[
             "actually ran"
         )
     return None
-
-
-def infer_anomalies(steps: list[StepResult], final_result: str) -> list[dict]:
-    """Heuristically derive anomalies from the agent's own trace."""
-    raw = "\n".join(
-        str(x)
-        for x in [*(s.detail for s in steps), *(s.error for s in steps), final_result or ""]
-    )
-    # Normalise "last-name" -> "last name" so hyphenated field ids still match.
-    blob = raw.lower().replace("-", " ").replace("_", " ")
-
-    def has(*terms):
-        return any(t in blob for t in terms)
-
-    anomalies = []
-    if has("identical", "same image", "images are the same", "all product images"):
-        anomalies.append({
-            "title": "Suspicious product images",
-            "severity": "medium",
-            "description": "The agent observed that product images appear identical / incorrect.",
-            "evidence": "Agent observations during the inventory step.",
-            "impact": "Visual bug; not necessarily blocking functionality.",
-        })
-
-    field_problem = has(
-        "empty", "corrupt", "wrong value", "not ", "doesn't", "does not", "did not",
-        "appended", "duplicat", "mismatch", "overwrit", "failed", "bug", "unexpected",
-    )
-    if (has("last name") or has("lastname")) and field_problem:
-        anomalies.append({
-            "title": "Last Name field misbehaviour",
-            "severity": "high",
-            "description": "The Last Name input on the checkout form appears to behave incorrectly "
-                           "(value not kept, or written into the wrong field).",
-            "evidence": "Agent observations during the checkout information step.",
-            "impact": "Can block or corrupt checkout completion.",
-        })
-    if (has("first name") or has("postal code") or has("zip")) and has(
-        "empty", "not 'test'", "not \"test\"", "corrupt", "appended", "duplicat", "wrong",
-    ):
-        anomalies.append({
-            "title": "Checkout form fields do not keep the typed values",
-            "severity": "high",
-            "description": "One or more checkout information fields did not retain the value the "
-                           "agent typed, so the form cannot be filled reliably.",
-            "evidence": "Agent observations of the field values after typing.",
-            "impact": "The checkout cannot be completed reliably for this user account.",
-        })
-    if not anomalies and has("suspicious", "unexpected", "bug", "failed", "error"):
-        anomalies.append({
-            "title": "Unexpected behaviour flagged by agent",
-            "severity": "medium",
-            "description": "The agent flagged one or more unexpected/suspicious observations.",
-            "evidence": "See the step-by-step timeline.",
-            "impact": "Needs manual review of the trace.",
-        })
-
-    seen, unique = set(), []
-    for a in anomalies:
-        if a["title"] not in seen:
-            seen.add(a["title"])
-            unique.append(a)
-    return unique
 
 
 def copy_screenshots(history, run_dir: Path, steps: list[StepResult]) -> None:
@@ -378,6 +302,7 @@ def run_one(scenario_path: Path, cfg: dict, embed: bool, budget: int) -> int:
         initial_actions=initial_actions,
         step_callback=build_step_callback(timings),
         should_stop=should_stop,
+        output_model=QAVerdict,
     )
     console.print(
         f"[dim]browser-use {meta.get('version')} - model {cfg.get('model')} - "
@@ -398,14 +323,29 @@ def run_one(scenario_path: Path, cfg: dict, embed: bool, budget: int) -> int:
 
     final_result = _safe(lambda: history.final_result()) or ""
     done = bool(_safe(lambda: history.is_done(), False))
-    successful = _safe(lambda: history.is_successful(), None)
     steps = extract_steps(history) if history is not None else []
-    anomalies = infer_anomalies(steps, final_result)
+
+    # ---- the AI's own verdict ------------------------------------------------
+    # browser-use validates final_result() against QAVerdict; parse_verdict is the
+    # fallback for models that ignored the schema and answered in prose.
+    verdict = _safe(lambda: history.structured_output) if history is not None else None
+    if verdict is None:
+        verdict = parse_verdict(final_result)
+
+    # AI-authored findings only. Facts about the run itself (budget stop, false
+    # success, unparsed output) go in `integrity`, never in the anomaly list.
+    anomalies = anomalies_for_report(verdict, n_steps=len(steps)) if verdict else []
+    integrity: list[dict] = []
+    successful = (
+        verdict.verdict == "PASS"
+        if verdict is not None
+        else bool(_safe(lambda: history.is_successful(), False))
+    )
 
     # A model that declares victory on the login page must not be able to PASS the run.
     false_success = detect_implausible_success(steps, successful)
     if false_success:
-        anomalies.append({
+        integrity.append({
             "title": "Agent claimed success without running the scenario",
             "severity": "high",
             "description": (
@@ -414,6 +354,7 @@ def run_one(scenario_path: Path, cfg: dict, embed: bool, budget: int) -> int:
             ),
             "evidence": f"Final browser URL: {steps[-1].url or '(none recorded)'}",
             "impact": "The result is inconclusive; the run only proves the agent started the page.",
+            "source": "harness",
         })
 
     if not done:
@@ -421,7 +362,7 @@ def run_one(scenario_path: Path, cfg: dict, embed: bool, budget: int) -> int:
             stop_reason = f"the {budget}s wall-clock budget was reached"
         else:
             stop_reason = f"the agent used all {meta['max_steps']} allowed steps"
-        anomalies.append({
+        integrity.append({
             "title": "Run stopped before the agent reached a final verdict",
             "severity": "medium",
             "description": (
@@ -431,7 +372,10 @@ def run_one(scenario_path: Path, cfg: dict, embed: bool, budget: int) -> int:
             ),
             "evidence": "Step timings below.",
             "impact": "The end-to-end result is not conclusive; raise Max Steps or the demo budget.",
+            "source": "harness",
         })
+    elif verdict is None:
+        integrity.append(unparsed_card(final_result))
 
     # Attach per-step timing to the matching step so it shows up in the report.
     # Timing callbacks are numbered like the agent's "Step N:" log, and history
@@ -444,25 +388,27 @@ def run_one(scenario_path: Path, cfg: dict, embed: bool, budget: int) -> int:
         note = f"step time: {timing['seconds']}s"
         step.detail = f"{step.detail}  _({note})_" if step.detail else f"_({note})_"
 
-    if done:
-        if false_success:
-            # Claimed victory without running anything: definitely not a pass.
-            outcome = FAILED
-        elif successful and not anomalies:
-            outcome = PASSED
-        elif successful:
-            outcome = MIXED
-        else:
-            outcome = FAILED
-    else:
+    # ---- outcome: the model decides, code only downgrades --------------------
+    if false_success:
+        outcome = FAILED
+    elif not done:
         outcome = MIXED if steps else FAILED
+    elif verdict is None:
+        # No usable verdict: never a pass. The raw narrative stays in the timeline.
+        outcome = MIXED
+    else:
+        outcome = {"PASS": PASSED, "MIXED": MIXED, "FAIL": FAILED}[verdict.verdict]
+        if outcome == PASSED and anomalies:
+            outcome = MIXED          # the model contradicted itself
 
-    if done:
-        assertion = final_result or ("agent reported success" if successful else "agent reported failure")
-        if false_success:
-            assertion = f"Agent reported success, but {false_success}."
+    if verdict is not None:
+        assertion = verdict.summary
+    elif done:
+        assertion = final_result or "the agent finished without a structured verdict"
     else:
         assertion = "the agent did not reach a final verdict (run stopped early)"
+    if false_success:
+        assertion = f"Agent reported success, but {false_success}."
 
     run_id = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     run_dir = PROJECT_ROOT / "reports" / "agent" / run_id
@@ -471,19 +417,21 @@ def run_one(scenario_path: Path, cfg: dict, embed: bool, budget: int) -> int:
         copy_screenshots(history, run_dir, steps)
 
     # A step's own status only records whether its browser action raised an error,
-    # so the step where the scenario actually failed is still marked PASSED. Point
-    # that step at the verdict so its row badge matches the test card (the
-    # deterministic path does the same in tests/conftest.py).
-    failed_step_index = pick_failed_step_index(steps) if outcome != PASSED else None
-    if outcome == FAILED and steps:
-        target = failed_step_index if failed_step_index is not None else steps[-1].index
+    # so the step where the scenario actually failed is still marked PASSED. The
+    # model says which agent step it saw the defect on; anchor on the first scenario
+    # step it marked FAIL, and only trust numbers that exist in the run.
+    failed_step_index = None
+    if outcome != PASSED and verdict is not None:
+        failed_step_index = failed_step_for_verdict(verdict, len(steps))
+    if outcome == FAILED and steps and failed_step_index is None:
+        failed_step_index = steps[-1].index
+    if failed_step_index is not None:
         for step in steps:
-            if step.index == target:
+            if step.index == failed_step_index:
                 step.status = FAILED
                 if not step.error:
                     step.error = assertion
                 break
-        failed_step_index = target
 
     test = TestResult(
         name=f"ai-agent :: {title}",
@@ -492,8 +440,10 @@ def run_one(scenario_path: Path, cfg: dict, embed: bool, budget: int) -> int:
         user=user,
         steps=steps,
         assertion=assertion,
+        traceback=final_result,
         note=("stopped at the time budget" if timings["stopped_at_budget"] else ""),
         failed_step_index=failed_step_index,
+        scenario_steps=list(verdict.scenario_steps) if verdict else [],
     )
 
     report = RunReport(
@@ -505,8 +455,11 @@ def run_one(scenario_path: Path, cfg: dict, embed: bool, budget: int) -> int:
         model=cfg.get("model", ""),
         provider=cfg.get("provider", ""),
         anomalies=anomalies,
+        integrity=integrity,
     )
-    if done and final_result:
+    if verdict is not None:
+        summary = verdict.summary
+    elif done and final_result:
         summary = final_result
     else:
         last_observation = steps[-1].detail.strip() if steps and steps[-1].detail else ""

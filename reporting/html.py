@@ -124,10 +124,36 @@ _SOURCE = r"""<!DOCTYPE html>
   {% if report.anomalies %}
   <section class="card">
     <h2>Anomalies Found</h2>
+    <p style="font-size:12px;color:var(--muted);margin:-4px 0 10px;">
+      Reported by the AI agent in its own words; code only validates the structure and links the evidence.
+    </p>
     {% for a in report.anomalies %}
     <div class="anomaly">
       <h3>{{ loop.index }}. {{ a.title }}</h3>
-      <p><strong>Severity:</strong> {{ a.severity }}<br/><strong>Description:</strong> {{ a.description }}
+      <p><strong>Severity:</strong> {{ a.severity }}
+      {% if a.scenario_step %}<br/><strong>Scenario step:</strong> {{ a.scenario_step }}{% endif %}
+      {% if a.step %}<br/><strong>Agent step:</strong> {{ a.step }}{% endif %}
+      {% if a.expected %}<br/><strong>Expected:</strong> {{ a.expected }}{% endif %}
+      {% if a.observed %}<br/><strong>Observed:</strong> {{ a.observed }}{% endif %}
+      {% if not a.expected and not a.observed %}<br/><strong>Description:</strong> {{ a.description }}{% endif %}
+      {% if a.evidence %}<br/><strong>Evidence:</strong> {{ a.evidence }}{% endif %}
+      {% if a.impact %}<br/><strong>Impact:</strong> {{ a.impact }}{% endif %}</p>
+    </div>
+    {% endfor %}
+  </section>
+  {% endif %}
+
+  {% if report.integrity %}
+  <section class="card">
+    <h2>Run Integrity</h2>
+    <p style="font-size:12px;color:var(--muted);margin:-4px 0 10px;">
+      Objective checks on the run itself, not product findings.
+    </p>
+    {% for a in report.integrity %}
+    <div class="anomaly" style="border-left-color:var(--fail);">
+      <h3>{{ loop.index }}. {{ a.title }}</h3>
+      <p><strong>Severity:</strong> {{ a.severity }}
+      <br/><strong>Description:</strong> {{ a.description }}
       {% if a.evidence %}<br/><strong>Evidence:</strong> {{ a.evidence }}{% endif %}
       {% if a.impact %}<br/><strong>Impact:</strong> {{ a.impact }}{% endif %}</p>
     </div>
@@ -166,6 +192,12 @@ _SOURCE = r"""<!DOCTYPE html>
         <span class="dur">{{ '%.2f'|format(t.duration) }}s</span>
         {% if t.user %}<span class="who">user: {{ t.user }}</span>{% endif %}
       </div>
+      {% if t.scenario_steps %}
+      <div style="font-size:12px;color:var(--muted);margin:0 0 8px 2px;">
+        <strong>Scenario steps (agent's own assessment):</strong>
+        <ul style="margin:4px 0 0 16px;padding:0;">{% for line in t.scenario_steps %}<li>{{ line }}</li>{% endfor %}</ul>
+      </div>
+      {% endif %}
       <table>
         <thead><tr><th>#</th><th>Step</th><th>Result</th><th>Evidence</th></tr></thead>
         <tbody>
@@ -261,6 +293,7 @@ def render_html(report: RunReport, out_dir: Path, embed: bool = True, title: str
                 "duration": test.duration,
                 "user": test.user,
                 "traceback": test.traceback or test.assertion,
+                "scenario_steps": test.scenario_steps,
                 "steps": [_step_ctx(s, out_dir, embed) for s in apply_recovery_status(test)],
             }
         )

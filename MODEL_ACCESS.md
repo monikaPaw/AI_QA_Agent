@@ -4,24 +4,24 @@ Edit this file to use any LLM provider. The runner reads this and configures Bro
 
 ## Active Configuration
 # --- Google Gemini (free tier) ---
-- Provider: gemini  # native Google GenAI (ChatGoogle). The OpenAI-compatible endpoint rejects browser-use's frequency_penalty
-- Model: gemini-3.5-flash-lite  # free tier = 15 req/min. The "-flash" models are capped at 5 req/min, too low for an agent loop (it makes ~6-10 calls/min)
-- Base URL: https://generativelanguage.googleapis.com/v1beta/openai/  # unused by ChatGoogle (native SDK picks the endpoint itself)
+- Provider: gemini 
+- Model: gemini-3.5-flash-lite
+- Base URL: https://generativelanguage.googleapis.com/v1beta/openai/ 
 - API Key:  # from GEMINI_API_KEY / GOOGLE_API_KEY in .env (see Tips)
 - Vision: true  # Gemini is multimodal; enables screenshot-based anomaly checks
 
 # --- Local Ollama (commented out) ---
-# - Provider: custom  # 'custom' = any OpenAI-compatible endpoint; Ollama's /v1 API
-# - Model: qwen2.5-1.5b-8k  # local model (see Tips at the bottom)
-# - Base URL: http://localhost:11434/v1  # local Ollama
-# - API Key: ollama  # Ollama ignores this value; it only has to be non-empty
+ #- Provider: custom  # 'custom' = any OpenAI-compatible endpoint; Ollama's /v1 API
+ #- Model: qwen2.5-1.5b-8k  # local model (see Tips at the bottom)
+ #- Base URL: http://localhost:11434/v1  # local Ollama
+ #- API Key: ollama  # Ollama ignores this value; it only has to be non-empty
 
 # --- OpenRouter (commented out) ---
-<!-- - Provider: openrouter
-- Model: nvidia/nemotron-3.5-super-vl:free 
-- Base URL: https://openrouter.ai/api/v1
-- API Key:  # from OPENROUTER_API_KEY in .env (see Tips)
-- Vision: true  # is multimodal; enables screenshot-based anomaly checks -->
+#- Provider: openrouter
+#- Model: nvidia/nemotron-3.5-super-vl:free 
+#- Base URL: https://openrouter.ai/api/v1
+#- API Key:  # from OPENROUTER_API_KEY in .env (see Tips)
+#- Vision: true  # is multimodal; enables screenshot-based anomaly checks 
 
 - Temperature: 0.1  # Lower = more deterministic, better for QA
 - Max Tokens: 8192  # Caps ONE response. 4096 truncated the model's structured output mid-run; 8192 removes that failure.
