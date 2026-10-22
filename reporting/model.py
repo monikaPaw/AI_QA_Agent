@@ -34,6 +34,18 @@ class StepResult:
     url: str = ""
     screenshot: Optional[str] = None  # path relative to the run directory
     error: str = ""
+    # Which scenario step this action belongs to (AI path only). `scenario_step_name`
+    # is the scenario's own wording, e.g. "Log into the application with the user above".
+    scenario_step: Optional[int] = None
+    scenario_step_name: str = ""
+    # Scenario-relative number, e.g. "1.3" = third action of scenario step 1.
+    # Empty in the deterministic path, where `index` already is the scenario step.
+    display_index: str = ""
+
+    @property
+    def label(self) -> str:
+        """How the report refers to this step: "1.3", or "4" in the pytest path."""
+        return self.display_index or str(self.index)
 
 
 @dataclass
@@ -118,6 +130,7 @@ def apply_recovery_status(test: "TestResult") -> list:
             workaround = _is_workaround(step.name)
         out.append({
             "index": step.index,
+            "display_index": getattr(step, "display_index", "") or "",
             "name": step.name,
             "status": status,
             "detail": step.detail,
@@ -125,8 +138,47 @@ def apply_recovery_status(test: "TestResult") -> list:
             "screenshot": step.screenshot,
             "error": step.error,
             "workaround": workaround,
+            "scenario_step": step.scenario_step,
+            "scenario_step_name": step.scenario_step_name,
         })
     return out
+
+
+def timeline_rows(steps: list) -> list:
+    """Insert scenario-step headers into a flat list from ``apply_recovery_status``.
+
+    AI-path steps carry ``scenario_step``/``scenario_step_name``; grouping them
+    makes the timeline read like the scenario ("1. Log into the application")
+    instead of one row per browser action. Steps without a mapping (the
+    deterministic pytest path) are returned unchanged.
+
+    Each item is ``{"kind": "group", ...}`` or ``{"kind": "action", "step": s}``.
+    """
+    if not any(s.get("scenario_step") is not None for s in steps):
+        return [{"kind": "action", "step": s} for s in steps]
+
+    rows: list = []
+    current = object()  # sentinel: the first row always opens a group
+    for step in steps:
+        key = step.get("scenario_step")
+        if key != current:
+            current = key
+            group = [s for s in steps if s.get("scenario_step") == key]
+            statuses = {s["status"] for s in group}
+            if FAILED in statuses:
+                status = FAILED
+            elif statuses == {RECOVERY}:
+                status = RECOVERY
+            else:
+                status = PASSED
+            rows.append({
+                "kind": "group",
+                "number": key,
+                "name": step.get("scenario_step_name") or "Other actions",
+                "status": status,
+            })
+        rows.append({"kind": "action", "step": step})
+    return rows
 
 
 @dataclass

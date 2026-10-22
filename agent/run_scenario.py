@@ -143,28 +143,223 @@ def _action_label(action) -> str:
     return json.dumps(data)
 
 
-def extract_steps(history) -> list[StepResult]:
+# ------------------------------------------------------------------ scenario
+_STEPS_SECTION = re.compile(
+    r"^##\s+Steps\s*$(.*?)(?=^##\s+|\Z)", re.MULTILINE | re.DOTALL | re.IGNORECASE
+)
+_STEP_LINE = re.compile(r"^\s*(\d+)[.)]\s+(.+)$")
+_REPORT_HINT = re.compile(r"^\s*>\s*report-match\s*:\s*(\d+)\s*=\s*(.+)$", re.IGNORECASE)
+
+
+def parse_scenario_steps(text: str) -> list:
+    """The scenario's numbered steps as ``[(number, text), ...]``.
+
+    These are the names the report shows instead of raw browser actions.
+    """
+    section = _STEPS_SECTION.search(text)
+    body = section.group(1) if section else text
+    steps = []
+    for line in body.splitlines():
+        match = _STEP_LINE.match(line)
+        if match:
+            step_text = match.group(2).strip().rstrip(".")
+            # Scenario steps use Markdown emphasis (**Backpack**); the timeline
+            # shows plain text, so drop the markers instead of printing them.
+            step_text = re.sub(r"[*_`]", "", step_text)
+            steps.append((int(match.group(1)), step_text))
+    return steps
+
+
+def parse_report_hints(text: str) -> dict:
+    """Human-only ``> report-match: N = keyword, ...`` lines from the scenario.
+
+    They map browser elements to scenario steps for the report timeline. As with
+    every ``>`` line, they are stripped before the agent sees the task.
+    """
+    hints: dict = {}
+    for line in text.splitlines():
+        match = _REPORT_HINT.match(line)
+        if not match:
+            continue
+        step = int(match.group(1))
+        keywords = [k.strip() for k in match.group(2).split(",") if k.strip()]
+        hints.setdefault(step, []).extend(keywords)
+    return hints
+
+
+# Fallback when a scenario has no report-match hints (identical to the two
+# checkout scenarios in this repo). Longest keyword wins, so "Add to cart"
+# (step 2) beats "cart" (step 3).
+_DEFAULT_STEP_MATCH = {
+    1: ("username", "password", "login"),
+    2: ("add to cart",),
+    3: ("cart",),
+    4: ("checkout",),
+    5: ("first name", "last name", "postal", "zip"),
+    6: ("continue",),
+    7: ("finish",),
+}
+
+
+def _action_data(action) -> dict:
+    try:
+        if hasattr(action, "model_dump"):
+            return action.model_dump(exclude_none=True, mode="json")
+        if isinstance(action, dict):
+            return dict(action)
+    except Exception:
+        pass
+    return {}
+
+
+def _action_name(action) -> str:
+    data = _action_data(action)
+    return next(iter(data)) if len(data) == 1 else ""
+
+
+def _action_value(action) -> dict:
+    data = _action_data(action)
+    if len(data) != 1:
+        return {}
+    value = next(iter(data.values()))
+    return value if isinstance(value, dict) else {}
+
+
+def _element_label(element) -> str:
+    """Human name of the element an action touched (e.g. 'Login', 'First Name').
+
+    browser-use stores this in the step's ``interacted_element``; without it the
+    report would only have the numeric index from the action JSON.
+    """
+    if element is None:
+        return ""
+    ax_name = getattr(element, "ax_name", None)
+    if ax_name:
+        return str(ax_name).strip()
+    attributes = getattr(element, "attributes", None) or {}
+    if isinstance(attributes, dict):
+        for key in ("aria-label", "placeholder", "name", "text", "id", "value"):
+            value = attributes.get(key)
+            if value:
+                return str(value).strip()
+    value = getattr(element, "node_value", None)
+    if value:
+        return str(value).strip()
+    return str(getattr(element, "node_name", "") or "").strip()
+
+
+def _human_action(action, element) -> str:
+    """Readable label: ``click "Login"`` instead of ``click({"index": 6})``."""
+    name = _action_name(action)
+    value = _action_value(action)
+    target = _element_label(element)
+
+    if name == "navigate":
+        url = value.get("url")
+        return f"navigate to {url}" if url else "navigate"
+    if name == "done":
+        return "done() - final verdict"
+    if name in ("input", "type") and value.get("text") is not None:
+        text = value["text"]
+        return f'type "{text}" into "{target}"' if target else f'type "{text}"'
+    if name == "click":
+        return f'click "{target}"' if target else "click"
+    if name == "send_keys" and value.get("keys"):
+        return f'press "{value["keys"]}"'
+    if name == "scroll":
+        return "scroll page"
+    if name == "wait":
+        return "wait"
+    if name == "extract_content":
+        return "extract page content"
+
+    label = _action_label(action)
+    return label if len(label) <= 120 else label[:117] + "..."
+
+
+def _match_haystack(action, element) -> str:
+    """Text used to map an action to a scenario step (element + typed value)."""
+    parts = [_element_label(element), _action_name(action)]
+    value = _action_value(action)
+    for key in ("text", "query", "keys"):
+        if value.get(key):
+            parts.append(str(value[key]))
+    return " ".join(p for p in parts if p).lower()
+
+
+def _scenario_step_for(action, element, table: dict, last_step):
+    """Pick the scenario step an action belongs to, or the sticky previous one."""
+    name = _action_name(action)
+    if name == "done":
+        return None
+    if name == "navigate":
+        return 1 if last_step is None else last_step
+
+    haystack = _match_haystack(action, element)
+    best = None  # (keyword length, step)
+    for step, keywords in table.items():
+        for keyword in keywords:
+            keyword = keyword.lower().strip()
+            if keyword and keyword in haystack:
+                score = len(keyword)
+                if best is None or score > best[0] or (score == best[0] and step < best[1]):
+                    best = (score, step)
+    return best[1] if best else last_step
+
+
+def extract_steps(history, scenario_steps=None, hints=None) -> list[StepResult]:
     """Turn a browser-use AgentHistoryList into ONE StepResult per agent step.
 
     browser-use is inconsistent here: ``model_actions()`` returns a flat list of
     every action ever taken, while thoughts/urls/screenshots are one entry per
     step. Iterating the history entries directly keeps everything aligned to a
     real step, so each row in the report is one decision the agent made.
+
+    Each action is labelled with the element it touched (not its numeric index)
+    and attributed to a scenario step, so the report reads like the scenario.
     """
     entries = getattr(history, "history", None)
     if not entries:
         return []
 
+    scenario_names = dict(scenario_steps or [])
+    match_table = dict(_DEFAULT_STEP_MATCH)
+    match_table.update(hints or {})
+
     steps: list[StepResult] = []
+    last_step = None
+    group_counts: dict = {}
     for entry in entries:
+        metadata = getattr(entry, "metadata", None)
+        if getattr(metadata, "step_number", None) == 0:
+            # browser-use records the initial `navigate` as step 0. It is setup,
+            # not an agent decision: counting it shifts every later step, so the
+            # report's "agent step N" no longer matches the model's own numbering.
+            continue
+
         state = getattr(entry, "state", None)
         output = getattr(entry, "model_output", None)
         results = getattr(entry, "result", None) or []
+        elements = getattr(state, "interacted_element", None) or []
 
-        actions: list[str] = []
+        action_models = list(getattr(output, "action", None) or []) if output is not None else []
+        labels: list[str] = []
+        step_number = last_step
         detail = ""
         if output is not None:
-            actions = [_action_label(a) for a in (getattr(output, "action", None) or [])]
+            mapped_numbers: list[int] = []
+            for i, action in enumerate(action_models):
+                element = elements[i] if i < len(elements) else None
+                labels.append(_human_action(action, element))
+                mapped = _scenario_step_for(action, element, match_table, last_step)
+                if mapped is not None:
+                    mapped_numbers.append(mapped)
+            # `done` is the agent finishing, not a scenario step, so an entry that
+            # only calls done() belongs under "Other actions".
+            if mapped_numbers:
+                step_number = mapped_numbers[-1]
+            elif any(_action_name(a) == "done" for a in action_models):
+                step_number = None
             current = getattr(output, "current_state", None)
             if current is not None:
                 detail = (
@@ -173,6 +368,9 @@ def extract_steps(history) -> list[StepResult]:
                     or getattr(current, "thinking", "")
                     or ""
                 )
+
+        if step_number is not None:
+            last_step = step_number
 
         error = ""
         for result in results:
@@ -183,14 +381,22 @@ def extract_steps(history) -> list[StepResult]:
 
         url = (getattr(state, "url", "") or "") if state is not None else ""
 
+        display_index = ""
+        if step_number is not None:
+            group_counts[step_number] = group_counts.get(step_number, 0) + 1
+            display_index = f"{step_number}.{group_counts[step_number]}"
+
         steps.append(
             StepResult(
                 index=len(steps) + 1,
-                name=" ; ".join(actions) if actions else "(no action recorded)",
+                name=" ; ".join(labels) if labels else "(no action recorded)",
                 status=FAILED if error else PASSED,
                 detail=detail,
                 url=url,
                 error=error,
+                scenario_step=step_number,
+                scenario_step_name=scenario_names.get(step_number, "") if step_number else "",
+                display_index=display_index,
             )
         )
     return steps
@@ -282,19 +488,45 @@ def detect_contradictory_pass(verdict) -> Optional[str]:
     return f"the verdict was PASS, but the agent marked '{line}' as not passed"
 
 
-def copy_screenshots(history, run_dir: Path, steps: list[StepResult]) -> None:
-    """Copy browser-use screenshots into the run directory, one per step.
+def copy_screenshots(history, run_dir: Path, steps: list[StepResult], captured=None) -> None:
+    """Copy screenshots into the run directory, one per step, as AFTER evidence.
 
-    Attaches by index (step N -> screenshots/step_NN.png) so a step with no
-    screenshot cannot shift the images of the later steps.
+    browser-use's own ``state.screenshot`` is captured at the START of a step, so
+    ``step_09.png`` would show the page before step 9 ran (e.g. the empty checkout
+    form for "type Test into First Name"), and the real result would appear on the
+    next row. ``captured`` holds screenshots taken by the on_step_end hook, i.e.
+    after the actions; when it is missing (older browser-use), fall back to
+    shifting browser-use's paths by one step.
     """
+    captured = list(captured or [])
+    shots_dir = run_dir / "screenshots"
+
+    if len(captured) >= len(steps) and any(captured):
+        for i, step in enumerate(steps):
+            data = captured[i]
+            if not data:
+                continue
+            shots_dir.mkdir(parents=True, exist_ok=True)
+            dest_name = f"step_{i + 1:02d}.png"
+            try:
+                (shots_dir / dest_name).write_bytes(data)
+            except Exception:
+                continue
+            step.screenshot = f"screenshots/{dest_name}"
+        return
+
     paths = _safe(lambda: history.screenshot_paths(), []) or []
     paths = [Path(p) if p else None for p in paths]
     if not any(paths):
         return
-    shots_dir = run_dir / "screenshots"
+    # `extract_steps` drops browser-use's step-0 initial-navigation entry, so the
+    # history path for step N is offset by however many entries were dropped.
+    history_entries = _safe(lambda: len(history.history), 0) or 0
+    skip = max(0, history_entries - len(steps))
     shots_dir.mkdir(parents=True, exist_ok=True)
-    for i, src in enumerate(paths):
+    for i, step in enumerate(steps):
+        # State after step N == state at the start of step N+1 (+ skipped entries).
+        src = paths[i + 1 + skip] if i + 1 + skip < len(paths) else None
         if src is None or not src.exists():
             continue
         dest_name = f"step_{i + 1:02d}{src.suffix or '.png'}"
@@ -303,8 +535,7 @@ def copy_screenshots(history, run_dir: Path, steps: list[StepResult]) -> None:
             shutil.copy2(src, dest)
         except Exception:
             continue
-        if i < len(steps):
-            steps[i].screenshot = f"screenshots/{dest_name}"
+        step.screenshot = f"screenshots/{dest_name}"
 
 
 def recent_action(agent_output) -> str:
@@ -344,11 +575,32 @@ def run_one(scenario_path: Path, cfg: dict, embed: bool, budget: int) -> int:
     console = Console()
     title, text = load_scenario(scenario_path)
     user = scenario_user(text)
+    scenario_steps = parse_scenario_steps(text)
+    hints = parse_report_hints(text)
     console.print(f"\n[bold cyan]Scenario:[/bold cyan] {title}  [dim]({scenario_path.name})[/dim]")
 
     from agent.agent_setup import AgentBuilder
 
-    timings: dict = {"started": time.time(), "last": time.time(), "steps": [], "stopped_at_budget": False}
+    timings: dict = {
+        "started": time.time(),
+        "last": time.time(),
+        "steps": [],
+        "screenshots": [],
+        "stopped_at_budget": False,
+    }
+
+    async def capture_after_step(hook_agent) -> None:
+        """Screenshot AFTER the step's actions, for the report timeline.
+
+        browser-use's own per-step screenshot is taken before the actions, so the
+        evidence for "click Login" would still show the login page. This runs on
+        every on_step_end, keeping the list aligned with `steps` (index 0 = step 1).
+        """
+        try:
+            data = await hook_agent.browser_session.take_screenshot(full_page=False)
+        except Exception:  # noqa: BLE001
+            data = None
+        timings["screenshots"].append(data)
 
     async def should_stop() -> bool:
         return budget > 0 and (time.time() - timings["started"]) > budget
@@ -369,7 +621,7 @@ def run_one(scenario_path: Path, cfg: dict, embed: bool, budget: int) -> int:
     )
 
     try:
-        history = AgentBuilder.run_agent(agent, meta["max_steps"])
+        history = AgentBuilder.run_agent(agent, meta["max_steps"], on_step_end=capture_after_step)
     except KeyboardInterrupt:
         console.print("[bold red]Interrupted by user.[/bold red]")
         return 1
@@ -382,7 +634,7 @@ def run_one(scenario_path: Path, cfg: dict, embed: bool, budget: int) -> int:
 
     final_result = _safe(lambda: history.final_result()) or ""
     done = bool(_safe(lambda: history.is_done(), False))
-    steps = extract_steps(history) if history is not None else []
+    steps = extract_steps(history, scenario_steps, hints) if history is not None else []
 
     # ---- the AI's own verdict ------------------------------------------------
     # browser-use validates final_result() against QAVerdict; parse_verdict is the
@@ -470,11 +722,11 @@ def run_one(scenario_path: Path, cfg: dict, embed: bool, budget: int) -> int:
     # entry N is that same step, so map by number instead of positionally.
     timing_by_step = {t["step"]: t for t in timings["steps"]}
     for i, step in enumerate(steps):
-        timing = timing_by_step.get(i)
+        timing = timing_by_step.get(i + 1)  # callback numbers steps from 1
         if not timing:
             continue
         note = f"step time: {timing['seconds']}s"
-        step.detail = f"{step.detail}  _({note})_" if step.detail else f"_({note})_"
+        step.detail = f"{step.detail}  ({note})" if step.detail else f"({note})"
 
     # ---- outcome: binary on purpose -----------------------------------------
     # PASS only when the agent says PASS and every check below agrees. Anything
@@ -506,7 +758,7 @@ def run_one(scenario_path: Path, cfg: dict, embed: bool, budget: int) -> int:
     run_dir = PROJECT_ROOT / "reports" / "agent" / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
     if history is not None:
-        copy_screenshots(history, run_dir, steps)
+        copy_screenshots(history, run_dir, steps, captured=timings.get("screenshots"))
 
     # A step's own status only records whether its browser action raised an error,
     # so the step where the scenario actually failed is still marked PASSED. The

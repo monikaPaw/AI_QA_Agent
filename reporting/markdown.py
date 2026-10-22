@@ -18,6 +18,7 @@ from .model import (
     RunReport,
     TestResult,
     apply_recovery_status,
+    timeline_rows,
 )
 
 
@@ -137,7 +138,8 @@ def render_markdown(report: RunReport) -> str:
             md.append(f"- **Description:** {test.assertion or 'Test failed'}")
             if step:
                 total = len([s for s in test.steps]) or step.index
-                md.append(f"- **Failed Step:** step {step.index} of {total} - {step.name}")
+                suffix = f" of {total}" if step.label == str(step.index) else ""
+                md.append(f"- **Failed Step:** step {step.label}{suffix} - {step.name}")
                 if step.detail:
                     md.append(f"- **Step Evidence:** {step.detail}")
                 if step.screenshot:
@@ -151,9 +153,9 @@ def render_markdown(report: RunReport) -> str:
             )
             md.append("")
             if step and step.screenshot:
-                md.append(f"**Screenshot of the failed step (step {step.index} - {step.name}):**")
+                md.append(f"**Screenshot of the failed step (step {step.label} - {step.name}):**")
                 md.append("")
-                md.append(f"![Failed step {step.index} - {step.name}]({step.screenshot})")
+                md.append(f"![Failed step {step.label} - {step.name}]({step.screenshot})")
                 md.append("")
 
     # ---------------------------------------------------------- timeline
@@ -172,6 +174,8 @@ def render_markdown(report: RunReport) -> str:
             md.append("")
             continue
         steps = apply_recovery_status(test)
+        rows = timeline_rows(steps)
+        grouped = any(r["kind"] == "group" for r in rows)
         if any(s["status"] == RECOVERY for s in steps):
             md.append(
                 "*Legend: `RECOVERY` = executed after the first failure, while the run was "
@@ -179,7 +183,14 @@ def render_markdown(report: RunReport) -> str:
                 "used to force a value (a real user could not do this).*"
             )
             md.append("")
-        for s in steps:
+        for row in rows:
+            if row["kind"] == "group":
+                label = _outcome_label(row["status"])
+                number = f"{row['number']}. " if row["number"] is not None else ""
+                md.append(f"#### {number}{row['name']} - {label}")
+                md.append("")
+                continue
+            s = row["step"]
             marker = ""
             if s["status"] == FAILED:
                 marker = " **<-- FAILED**"
@@ -187,7 +198,9 @@ def render_markdown(report: RunReport) -> str:
                 marker = " **<-- RECOVERY**"
             if s["workaround"]:
                 marker += " **<-- NON-USER WORKAROUND (JS)**"
-            md.append(f"#### Step {s['index']}: {s['name']}{marker}")
+            heading = "#####" if grouped else "####"
+            number = s.get("display_index") or s["index"]
+            md.append(f"{heading} Step {number}: {s['name']}{marker}")
             if s["detail"]:
                 md.append(f"**Observation:** {s['detail']}")
             if s["error"]:
@@ -214,7 +227,7 @@ def render_markdown(report: RunReport) -> str:
             md.append("")
             step = test.failed_step
             if step and step.screenshot:
-                md.append(f"![Failed step {step.index} - {step.name}]({step.screenshot})")
+                md.append(f"![Failed step {step.label} - {step.name}]({step.screenshot})")
                 md.append("")
 
     # ---------------------------------------------------------- closing

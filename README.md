@@ -95,7 +95,7 @@ The generated file only imports the shared `tests\steps\step_helpers.py`, so the
 
 ## The scenario (single source of truth)
 
-`scenarios/checkout_standard_user.md` and `scenarios/checkout_problem_user.md` hold the user account, the test data, the 7 steps and the expected results:
+`scenarios/checkout_standard_user.md` and `scenarios/checkout_problem_user.md` hold the user account, the test data, the numbered steps and the expected results:
 
 1. Log into the application
 2. Add **Sauce Labs Backpack** and **Sauce Labs Bike Light** to the cart
@@ -105,7 +105,19 @@ The generated file only imports the shared `tests\steps\step_helpers.py`, so the
 6. Continue through checkout
 7. Complete the order successfully
 
-`prompts/qa_system_prompt.md` contains **QA rules only** (verify field values, flag anomalies, report with evidence) — no step list — so the instructions cannot drift away from the scenario. Lines in a scenario starting with `>` are human-only notes, stripped by `build_task()` before the agent sees them.
+`prompts/qa_system_prompt.md` contains **QA rules only** (verify field values, flag anomalies, report with evidence) — no step list — so the instructions cannot drift away from the scenario. Lines in a scenario starting with `>` are human-only notes, stripped by `build_task()` before the agent sees them. One kind of note controls the report timeline:
+
+```markdown
+> report-match: 1 = Username, Password, Login
+> report-match: 2 = Add to cart
+```
+
+Each line maps a scenario step to the words that identify it on the page (the
+element's accessible name, e.g. `Login`). These hints are **optional**: the agent's
+actions are grouped under scenario steps using a built-in SauceDemo keyword table,
+and a hint only refines the wording for new pages. Matching is deterministic (no
+model call): the longest keyword wins, so `Add to cart` (step 2) beats `cart`
+(step 3).
 
 ## The reports
 
@@ -139,12 +151,17 @@ from the failing test in the pytest path); `Run Integrity` holds code-authored f
 about the run (budget stop, false success, unparsed verdict). `Failures Found` always
 follows, so a failing run stays visible even when no anomaly was authored.
 
-`index.html` shows **one row per scenario step** with, in the same place:
+`index.html` shows the timeline as **one group per scenario step** (the scenario's
+own wording), with the individual actions indented under it. Each group carries a
+**PASSED / FAILED / RECOVERY** badge, and each action shows:
 
-- the step number and name,
-- its own **PASSED / FAILED / NOT RUN** badge,
+- the action in plain language (`type "problem_user" into "Username"`,
+  `click "Login"`) instead of `click({"index": 150})`,
 - the observation and (for a failure) the assertion message,
 - the **screenshot taken right after that step** (the failure row is highlighted and enlarged), plus the traceback in a collapsible block.
+
+Actions the agent took that do not belong to a scenario step (for example the
+final `done()` call) appear under **Other actions**, so nothing is hidden.
 
 Screenshots are **embedded as base64 by default**, so `index.html` is a single self-contained file you can move, email or attach to a bug report. Use `--no-embed` to keep it small with image files next to it instead. A screenshot is captured after **every** step and again at the moment a test fails.
 

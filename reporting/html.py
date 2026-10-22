@@ -26,6 +26,7 @@ from .model import (
     RunReport,
     TestResult,
     apply_recovery_status,
+    timeline_rows,
 )
 
 _ENV = Environment(autoescape=True)
@@ -84,6 +85,10 @@ _SOURCE = r"""<!DOCTYPE html>
   code { background:#f1f3f4; padding:1px 5px; border-radius:4px; font-size:13px; }
   ul { padding-left:22px; color:#3c4043; } li { margin-bottom:6px; }
   .anomaly { border:1px solid var(--line); border-left:4px solid var(--warn); border-radius:6px; padding:12px 16px; margin-bottom:10px; }
+  .group-row td { background:#eef2f7; border-top:2px solid #d7dee8; font-weight:600; }
+  .group-row .num { color:var(--muted); }
+  .group-row .group-name { color:var(--ink); }
+  .group-row .pill { margin-left:6px; }
   footer { text-align:center; color:#9aa0a6; font-size:12px; padding:14px 0 0; }
   #lightbox { display:none; position:fixed; inset:0; background:rgba(0,0,0,.9); z-index:1000; cursor:zoom-out; }
   #lightbox img { max-width:94%; max-height:94%; margin:3% auto; display:block; border-radius:6px; }
@@ -167,7 +172,7 @@ _SOURCE = r"""<!DOCTYPE html>
       <h3>{{ loop.index }}. {{ t.name }}</h3>
       <p><strong>Severity:</strong> high<br/>
          <strong>Description:</strong> {{ t.assertion or 'Test failed' }}
-         {% if t.step %}<br/><strong>Failed step:</strong> step {{ t.step.index }} &mdash; {{ t.step.name }}{% endif %}
+         {% if t.step %}<br/><strong>Failed step:</strong> step {{ t.step.label }} &mdash; {{ t.step.name }}{% endif %}
          <br/><strong>Duration:</strong> {{ '%.2f'|format(t.duration) }}s
          <br/><strong>Impact:</strong> the checkout scenario cannot complete for this user account.</p>
       {% if t.img %}<img class="thumb" src="{{ t.img }}" alt="failure" loading="lazy" onclick="zoom(this.src)"/>{% endif %}
@@ -200,18 +205,27 @@ _SOURCE = r"""<!DOCTYPE html>
       <table>
         <thead><tr><th>#</th><th>Step</th><th>Result</th><th>Evidence</th></tr></thead>
         <tbody>
-        {% for s in t.steps %}
-          <tr class="{{ s.row_class }}">
-            <td class="num">{{ s.index }}</td>
-            <td class="step">{{ s.name }}{% if s.workaround %}<span class="workaround">NON-USER WORKAROUND</span>{% endif %}</td>
-            <td class="result"><span class="pill {{ s.status }}">{{ s.label }}</span></td>
+        {% for r in t.rows %}
+          {% if r.kind == 'group' %}
+          <tr class="group-row">
+            <td class="num">{% if r.number is not none %}{{ r.number }}{% endif %}</td>
+            <td class="step"><span class="group-name">{{ r.name }}</span></td>
+            <td class="result"><span class="pill {{ r.status }}">{{ r.label }}</span></td>
+            <td></td>
+          </tr>
+          {% else %}
+          <tr class="{{ r.row_class }}">
+            <td class="num">{{ r.display_index }}</td>
+            <td class="step">{{ r.name }}{% if r.workaround %}<span class="workaround">NON-USER WORKAROUND</span>{% endif %}</td>
+            <td class="result"><span class="pill {{ r.status }}">{{ r.label }}</span></td>
             <td>
-              {% if s.detail %}<div class="detail">{{ s.detail }}</div>{% endif %}
-              {% if s.error %}<div class="error">{{ s.error }}</div>{% endif %}
-              {% if s.url %}<div class="url">{{ s.url }}</div>{% endif %}
-              {% if s.img %}<img class="thumb" src="{{ s.img }}" alt="step {{ s.index }}" loading="lazy" onclick="zoom(this.src)"/>{% endif %}
+              {% if r.detail %}<div class="detail">{{ r.detail }}</div>{% endif %}
+              {% if r.error %}<div class="error">{{ r.error }}</div>{% endif %}
+              {% if r.url %}<div class="url">{{ r.url }}</div>{% endif %}
+              {% if r.img %}<img class="thumb" src="{{ r.img }}" alt="step {{ r.display_index }}" loading="lazy" onclick="zoom(this.src)"/>{% endif %}
             </td>
           </tr>
+          {% endif %}
         {% endfor %}
         </tbody>
       </table>
@@ -257,6 +271,7 @@ def _step_ctx(step, out_dir: Path, embed: bool) -> Dict[str, Any]:
     # `step` is the dict produced by apply_recovery_status (already re-labelled).
     return {
         "index": step["index"],
+        "display_index": step.get("display_index") or step["index"],
         "name": step["name"],
         "status": step["status"],
         "label": _LABELS.get(step["status"], step["status"].upper()),
@@ -267,6 +282,30 @@ def _step_ctx(step, out_dir: Path, embed: bool) -> Dict[str, Any]:
         "row_class": step["status"] if step["status"] in (FAILED, NOT_RUN, RECOVERY) else "",
         "img": _img_src(out_dir, step["screenshot"], embed),
     }
+
+
+def _timeline_rows(test: TestResult, out_dir: Path, embed: bool) -> List[Dict[str, Any]]:
+    """Rows for the AI timeline: a scenario-step header followed by its actions.
+
+    Grouping uses the scenario step each action was mapped to, so the report reads
+    "1. Log into the application" instead of "click({'index': 6})". Actions that
+    cannot be mapped fall under "Other actions". The deterministic pytest path has
+    no scenario_step on its steps, so it renders exactly as before (no headers).
+    """
+    rows: List[Dict[str, Any]] = []
+    for row in timeline_rows(apply_recovery_status(test)):
+        if row["kind"] == "group":
+            status = row["status"]
+            rows.append({
+                "kind": "group",
+                "number": row["number"],
+                "name": row["name"],
+                "status": status,
+                "label": _LABELS.get(status, status.upper()),
+            })
+        else:
+            rows.append({"kind": "action", **_step_ctx(row["step"], out_dir, embed)})
+    return rows
 
 
 def render_html(report: RunReport, out_dir: Path, embed: bool = True, title: str = "SauceDemo QA Test Report") -> str:
@@ -292,7 +331,7 @@ def render_html(report: RunReport, out_dir: Path, embed: bool = True, title: str
                 "user": test.user,
                 "traceback": test.traceback or test.assertion,
                 "scenario_steps": test.scenario_steps,
-                "steps": [_step_ctx(s, out_dir, embed) for s in apply_recovery_status(test)],
+                "rows": _timeline_rows(test, out_dir, embed),
             }
         )
 
